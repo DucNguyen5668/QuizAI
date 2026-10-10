@@ -1,625 +1,270 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import DocumentImport from "./components/DocumentImport";
-import {
-  initDB,
-  getPresetSections,
-  getCustomSections as fetchCustomSections,
-  saveCustomSections as persistCustomSections,
-  clearAllCustomSections as clearCustomDB,
-  deleteCustomSection as deleteCustomSectionDB,
-  getProgress,
-  saveAnswer,
-  saveRevealed,
-  revealAllInSection,
-  resetSectionProgress,
-  getSetting,
-  setSetting,
-} from "./data/dataService";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import Icon from "./components/Icon";
+import QuestionCard from "./components/QuestionCard";
+import { getStats, questionStatus, toggleAnswer } from "./utils/quiz";
+import { initDB, getSectionCatalog, getSectionQuestions, getProgress, getSetting, setSetting, saveAnswer, saveRevealed, revealAllInSection, resetSectionProgress, saveCustomSections, deleteCustomSection, setSectionArchived } from "./data/dataService";
 
-const OPTION_LABELS = ["A", "B", "C", "D"];
+const CreateQuiz = lazy(() => import("./components/CreateQuiz"));
+const navigation = [{ id: "home", icon: "grid", label: "Tổng quan" }, { id: "library", icon: "book", label: "Đề của tôi" }, { id: "archive", icon: "archive", label: "Kho lưu trữ" }];
+const pageTitles = { home: "Tổng quan", library: "Đề của tôi", archive: "Kho lưu trữ", create: "Tạo bộ đề", quiz: "Luyện tập" };
+const formatCount = (n) => n.toLocaleString("vi-VN");
 
-/* ─── statistics ─────────────────────────────────────────────────────── */
-function getStats(section, answers) {
-  return section.questions.reduce(
-    (stats, question) => {
-      const selected = answers[question.id];
-      if (selected) {
-        const reqLen = question.ans ? question.ans.split(",").length : 1;
-        const selLen = selected.split(",").length;
-        if (selLen >= reqLen) {
-          stats.answered += 1;
-          if (selected === question.ans) stats.correct += 1;
-        }
-      }
-      return stats;
-    },
-    { answered: 0, correct: 0, total: section.questions.length }
-  );
+function QuizTile({ section, onOpen, onArchive, onDelete }) {
+  return <article className="quiz-tile"><div className="tile-top"><span className={`tile-icon ${section.origin === "preset" ? "blue" : ""}`}><Icon name={section.kind === "mod" ? "layers" : "file"} size={23} /></span><span className="badge">{section.origin === "preset" ? "PRM393" : section.kind === "manual" ? "Tự tạo" : section.kind === "extracted" ? "Đề gốc" : "Từ tài liệu"}</span></div><h3>{section.title}</h3><p className="tile-subject">{section.subject || (section.origin === "preset" ? "Flutter & Dart" : section.source || "Chủ đề tự chọn")}</p><div className="tile-meta"><span><Icon name="file" size={15} /> {formatCount(section.questionCount || 0)} câu hỏi</span>{section.createdAt && <span>{new Date(section.createdAt).toLocaleDateString("vi-VN")}</span>}</div><div className="tile-footer"><button className="text-button" onClick={() => onOpen(section)} type="button">Luyện tập <Icon name="arrow" size={17} /></button>{section.origin === "custom" && <div className="tile-actions"><button className="icon-button" type="button" title={section.archived ? "Đưa về Đề của tôi" : "Đưa vào kho lưu trữ"} aria-label={`${section.archived ? "Khôi phục" : "Lưu trữ"} ${section.title}`} onClick={() => onArchive(section)}><Icon name={section.archived ? "book" : "archive"} size={17} /></button><button className="icon-button danger" type="button" aria-label={`Xóa ${section.title}`} title="Xóa bộ đề" onClick={() => onDelete(section)}><Icon name="trash" size={17} /></button></div>}</div></article>;
 }
 
-/* ─── text formatting ─────────────────────────────────────────────────── */
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+function EmptyState({ filtered, onCreate }) {
+  return <div className="empty-state"><span className="empty-symbol"><Icon name={filtered ? "search" : "book"} size={30} /></span><h3>{filtered ? "Chưa tìm thấy bộ đề phù hợp" : "Bộ đề đầu tiên bắt đầu từ bạn"}</h3><p>{filtered ? "Thử tìm bằng tên bộ đề hoặc chủ đề khác." : "Tự nhập câu hỏi hoặc tạo đề từ tài liệu. Mọi môn học đều có một không gian ở đây."}</p>{!filtered && <button className="primary-button" onClick={onCreate} type="button"><Icon name="plus" size={18} /> Tạo bộ đề đầu tiên</button>}</div>;
 }
 
-function formatText(value) {
-  return escapeHtml(value)
-    .replace(
-      /```(?:\w+)?\n?([\s\S]*?)```/g,
-      (_, code) => `<pre>${code.replace(/^\n+|\n+$/g, "")}</pre>`
-    )
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\n/g, "<br />");
-}
-
-function FormattedText({ children, className = "" }) {
-  return (
-    <span
-      className={`formatted-text ${className}`}
-      dangerouslySetInnerHTML={{ __html: formatText(children) }}
-    />
-  );
-}
-
-/* ─── QuestionCard ────────────────────────────────────────────────────── */
-function QuestionCard({ question, index, selectedAnswer, isRevealed, onChoose, onReveal }) {
-  const correctAnsArray = question.ans ? question.ans.split(",") : ["A"];
-  const maxAnswers = correctAnsArray.length;
-  const selectedArray = selectedAnswer ? selectedAnswer.split(",") : [];
-  
-  const isLocked = Boolean(isRevealed || (selectedArray.length > 0 && selectedArray.length >= maxAnswers));
-  const isWarning = question.why?.startsWith("⚠️");
-
-  return (
-    <article className="question-card">
-      <div className="question-heading">
-        <span className={`question-number ${question.bs ? "bonus" : ""}`}>
-          {question.bs ? "BS " : ""}Câu {index + 1}
-        </span>
-        <FormattedText className="question-stem">{question.stem}</FormattedText>
-      </div>
-
-      <div className="options">
-        {OPTION_LABELS.filter((label) => question.opts[label]).map((label) => {
-          const isSelected = selectedArray.includes(label);
-          const isCorrectOption = correctAnsArray.includes(label);
-          
-          const isCorrect = isLocked && isCorrectOption;
-          const isWrong = isLocked && isSelected && !isCorrectOption;
-          const isSelecting = !isLocked && isSelected;
-
-          return (
-            <button
-              className={["option", isCorrect ? "correct" : "", isWrong ? "wrong" : "", isSelecting ? "selected" : ""]
-                .filter(Boolean)
-                .join(" ")}
-              disabled={isLocked}
-              key={label}
-              onClick={() => onChoose(question.id, label)}
-              type="button"
-            >
-              <span className="option-label">{label}</span>
-              <FormattedText className="option-content">{question.opts[label]}</FormattedText>
-            </button>
-          );
-        })}
-      </div>
-
-      {isLocked && (
-        <div className={`explanation ${isWarning ? "warning" : ""}`}>
-          <strong>Đáp án {question.ans}.</strong>{" "}
-          <FormattedText>{question.why || "(chưa có giải thích)"}</FormattedText>
-        </div>
-      )}
-
-      {!isLocked && (
-        <button className="reveal-button" onClick={() => onReveal(question.id)} type="button">
-          Hiện đáp án
-        </button>
-      )}
-    </article>
-  );
-}
-
-/* ─── Custom section nav badge ─────────────────────────────────────────────────── */
-function CustomSectionActions({ onClearAll, onDeleteCurrent, hasMultiple }) {
-  return (
-    <div style={{ display: "flex", gap: "8px" }}>
-      {onDeleteCurrent && (
-        <button
-          className="utility-button danger-button"
-          onClick={() => {
-            if (window.confirm("Xóa đề này?")) onDeleteCurrent();
-          }}
-          type="button"
-          title="Xóa đề hiện tại"
-        >
-          🗑 Xóa đề này
-        </button>
-      )}
-      {hasMultiple && (
-        <button
-          className="utility-button danger-button"
-          onClick={() => {
-            if (window.confirm("Xóa tất cả đề đã tạo từ tài liệu?")) onClearAll();
-          }}
-          type="button"
-          title="Xóa tất cả đề tùy chỉnh"
-        >
-          🗑 Xóa tất cả
-        </button>
-      )}
-    </div>
-  );
-}
-
-/* ─── App ─────────────────────────────────────────────────────────────── */
 export default function App() {
-  /* ── DB loading state ───────────────────────────────────────────────── */
-  const [dbReady, setDbReady] = useState(false);
-
-  /* ── Data state ─────────────────────────────────────────────────────── */
-  const [presetSections, setPresetSections] = useState([]);
-  const [customSections, setCustomSections] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState("");
+  const [catalog, setCatalog] = useState([]);
+  const [page, setPage] = useState("home");
+  const [collection, setCollection] = useState(false);
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [filter, setFilter] = useState("all");
+  const [sort, setSort] = useState("newest");
+  const [theme, setTheme] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const [lastSession, setLastSession] = useState(null);
+  const [section, setSection] = useState(null);
+  const [quizLoading, setQuizLoading] = useState(false);
   const [answers, setAnswers] = useState({});
   const [revealed, setRevealed] = useState({});
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [showMap, setShowMap] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("saved");
+  const answersRef = useRef({});
+  const revealedRef = useRef({});
+  const sectionRef = useRef(null);
+  const sessionRef = useRef(null);
+  const loadToken = useRef(0);
+  const saveQueue = useRef(Promise.resolve());
+  const failedSaves = useRef([]);
+  const questionArea = useRef(null);
 
-  /* ── UI state ───────────────────────────────────────────────────────── */
-  const [activeTab, setActiveTab] = useState("preset");
-  const [showImport, setShowImport] = useState(false);
-  const [activeSectionIndex, setActiveSectionIndex] = useState(0);
-  const [customSectionIndex, setCustomSectionIndex] = useState(0);
-  const [theme, setTheme] = useState(
-    window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-  );
-
-  // Ref to track whether auto-save debounce is needed
-  const saveTimerRef = useRef(null);
-
-  /* ── Initialize database ────────────────────────────────────────────── */
   useEffect(() => {
     let cancelled = false;
-
-    async function boot() {
-      await initDB();
-      if (cancelled) return;
-
-      // Load all data from IndexedDB
-      const [preset, custom, prog, savedTheme, savedTab, savedSecIdx] = await Promise.all([
-        getPresetSections(),
-        fetchCustomSections(),
-        getProgress(),
-        getSetting("theme"),
-        getSetting("activeTab", "preset"),
-        getSetting("sectionIndex", 0),
-      ]);
-
-      if (cancelled) return;
-
-      setPresetSections(preset);
-      setCustomSections(custom);
-      setAnswers(prog.answers);
-      setRevealed(prog.revealed);
-
-      if (savedTheme === "light" || savedTheme === "dark") {
-        setTheme(savedTheme);
-      }
-      setActiveTab(savedTab === "custom" ? "custom" : "preset");
-      setActiveSectionIndex(
-        Math.min(Math.max(Number(savedSecIdx) || 0, 0), Math.max(preset.length - 1, 0))
-      );
-
-      setDbReady(true);
-    }
-
-    boot();
+    (async () => {
+      try {
+        await initDB();
+        const [sections, savedTheme, session] = await Promise.all([getSectionCatalog(), getSetting("theme"), getSetting("lastSession")]);
+        if (cancelled) return;
+        setCatalog(sections);
+        if (["light", "dark"].includes(savedTheme)) setTheme(savedTheme);
+        setLastSession(session);
+        sessionRef.current = session;
+        setReady(true);
+      } catch (err) { if (!cancelled) setError(`Không thể mở dữ liệu: ${err.message}`); }
+    })();
     return () => { cancelled = true; };
   }, []);
 
-  /* Determine active section */
-  const presetSection = presetSections[activeSectionIndex];
-  const customSection = customSections[customSectionIndex];
-  const activeSection = activeTab === "preset" ? presetSection : customSection;
-
-  const activeStats = useMemo(
-    () => (activeSection ? getStats(activeSection, answers) : { answered: 0, correct: 0, total: 0 }),
-    [activeSection, answers]
-  );
-  const bonusCount = useMemo(
-    () => (activeSection?.questions.filter((q) => q.bs).length ?? 0),
-    [activeSection]
-  );
-  const progressPercent = activeStats.total
-    ? (activeStats.answered / activeStats.total) * 100
-    : 0;
-
-  /* Sync theme */
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    if (dbReady) setSetting("theme", theme);
-  }, [theme, dbReady]);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme === "dark" ? "#101b18" : "#f7f9f8");
+    if (ready) setSetting("theme", theme).catch((err) => setError(`Chưa lưu được giao diện: ${err.message}`));
+  }, [theme, ready]);
 
-  /* Auto-save UI navigation state (debounced) */
+  const persist = useCallback((operation) => {
+    setSaveStatus("saving");
+    const pending = saveQueue.current.then(operation);
+    saveQueue.current = pending.catch((err) => {
+      failedSaves.current.push(operation);
+      setSaveStatus("error");
+      setError(`Chưa lưu được tiến độ: ${err.message}`);
+    });
+    pending.then(() => { if (saveQueue.current === currentQueue && !failedSaves.current.length) setSaveStatus("saved"); }, () => {});
+    const currentQueue = saveQueue.current;
+    return pending;
+  }, []);
+
   useEffect(() => {
-    if (!dbReady) return;
+    if (!section || quizLoading || page !== "quiz") return;
+    const session = { id: section.id, origin: section.origin, questionIndex, title: section.title };
+    sessionRef.current = session;
+    setLastSession(session);
+    setSetting("lastSession", session).catch((err) => setError(`Chưa lưu được vị trí làm bài: ${err.message}`));
+  }, [section, questionIndex, quizLoading, page]);
 
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      setSetting("sectionIndex", activeSectionIndex);
-      setSetting("activeTab", activeTab);
-    }, 200);
+  const activeQuizzes = useMemo(() => catalog.filter((s) => !s.archived), [catalog]);
+  const preset = useMemo(() => catalog.filter((s) => s.origin === "preset"), [catalog]);
+  const customArchived = useMemo(() => catalog.filter((s) => s.archived && s.origin === "custom"), [catalog]);
+  const totalPresetQuestions = preset.reduce((n, s) => n + s.questionCount, 0);
+  const stats = useMemo(() => getStats(section?.questions || [], answers), [section, answers]);
+  const progress = stats.total ? Math.round(stats.answered / stats.total * 100) : 0;
+  const currentQuestion = section?.questions[questionIndex];
+  const lastQuiz = catalog.find((s) => s.id === lastSession?.id && s.origin === lastSession?.origin);
+  const visibleQuizzes = useMemo(() => {
+    const source = page === "archive" ? (collection ? preset : customArchived) : activeQuizzes;
+    const query = deferredSearch.trim().toLocaleLowerCase("vi");
+    return source.filter((s) => (!query || `${s.title} ${s.subject || ""} ${s.source || ""} ${s.collectionId || ""}`.toLocaleLowerCase("vi").includes(query)) && (filter === "all" || (filter === "module" ? s.kind === "mod" : s.kind !== "mod"))).sort((a, b) => sort === "name" ? a.title.localeCompare(b.title, "vi", { numeric: true }) : sort === "count" ? b.questionCount - a.questionCount : collection ? preset.indexOf(a) - preset.indexOf(b) : (b.createdAt || "").localeCompare(a.createdAt || ""));
+  }, [page, collection, preset, customArchived, activeQuizzes, deferredSearch, filter, sort]);
 
-    return () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    };
-  }, [activeSectionIndex, activeTab, dbReady]);
+  function navigate(nextPage) {
+    loadToken.current++;
+    setPage(nextPage);
+    setSearch("");
+    setFilter("all");
+    setCollection(false);
+    setShowMap(false);
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }
 
-  /* Handlers */
-  const changePresetSection = useCallback((idx) => {
-    setActiveSectionIndex(idx);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
+  async function openQuiz(metadata, resume = true) {
+    const token = ++loadToken.current;
+    setPage("quiz");
+    setQuizLoading(true);
+    setShowMap(false);
+    if (!failedSaves.current.length) setError("");
+    setSection(null);
+    sectionRef.current = null;
+    try {
+      await saveQueue.current;
+      const questions = await getSectionQuestions(metadata);
+      const prog = await getProgress(questions.map((q) => q.id));
+      if (token !== loadToken.current) return;
+      const nextSection = { ...metadata, questions };
+      sectionRef.current = nextSection;
+      setSection(nextSection);
+      answersRef.current = prog.answers;
+      revealedRef.current = prog.revealed;
+      setAnswers(prog.answers);
+      setRevealed(prog.revealed);
+      const saved = sessionRef.current;
+      setQuestionIndex(resume && saved?.id === metadata.id && saved.origin === metadata.origin ? Math.min(Math.max(saved.questionIndex || 0, 0), Math.max(questions.length - 1, 0)) : 0);
+      setQuizLoading(false);
+      window.scrollTo({ top: 0, behavior: "instant" });
+    } catch (err) { if (token === loadToken.current) { setQuizLoading(false); setError(`Không thể tải bộ đề: ${err.message}`); } }
+  }
 
-  const changeCustomSection = useCallback((idx) => {
-    setCustomSectionIndex(idx);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
-
-  function chooseAnswer(questionId, answer) {
-    if (revealed[questionId]) return;
-
-    const q = activeSection?.questions.find((x) => x.id === questionId);
+  const choose = useCallback((id, label) => {
+    const q = sectionRef.current?.questions.find((x) => x.id === id);
     if (!q) return;
+    const next = toggleAnswer(q, answersRef.current[id], label, revealedRef.current[id]);
+    if (next === (answersRef.current[id] || "")) return;
+    answersRef.current = { ...answersRef.current, [id]: next };
+    setAnswers(answersRef.current);
+    persist(() => saveAnswer(id, next)).catch(() => {});
+  }, [persist]);
 
-    const correctAnsArray = q.ans ? q.ans.split(",") : ["A"];
-    const maxAnswers = correctAnsArray.length;
+  const reveal = useCallback((id) => {
+    revealedRef.current = { ...revealedRef.current, [id]: true };
+    setRevealed(revealedRef.current);
+    persist(() => saveRevealed(id)).catch(() => {});
+  }, [persist]);
 
-    setAnswers((cur) => {
-      let currentSel = cur[questionId] ? cur[questionId].split(",") : [];
-
-      if (currentSel.includes(answer)) {
-        if (currentSel.length >= maxAnswers) return cur; // already locked
-        currentSel = currentSel.filter((a) => a !== answer);
-      } else {
-        if (currentSel.length < maxAnswers) {
-          currentSel.push(answer);
-        } else {
-          return cur; // already locked
-        }
-      }
-
-      currentSel.sort();
-      const newAnswerStr = currentSel.join(",");
-      
-      saveAnswer(questionId, newAnswerStr);
-      return { ...cur, [questionId]: newAnswerStr };
-    });
+  function jumpTo(index) {
+    setQuestionIndex(index);
+    setShowMap(false);
+    questionArea.current?.scrollIntoView({ block: "start", behavior: "instant" });
   }
 
-  function revealAnswer(questionId) {
-    setRevealed((cur) => ({ ...cur, [questionId]: true }));
-    // Persist to IndexedDB
-    saveRevealed(questionId);
+  useEffect(() => {
+    if (page !== "quiz" || !section) return;
+    function onKey(event) {
+      if (event.altKey || event.ctrlKey || event.metaKey || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(event.target.tagName) || event.target.isContentEditable) return;
+      if (event.key === "ArrowRight") { event.preventDefault(); setQuestionIndex((i) => Math.min(i + 1, section.questions.length - 1)); }
+      if (event.key === "ArrowLeft") { event.preventDefault(); setQuestionIndex((i) => Math.max(i - 1, 0)); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [page, section]);
+
+  async function handleSave(newSections) {
+    await saveCustomSections(newSections);
+    const updated = await getSectionCatalog();
+    setCatalog(updated);
+    const first = updated.find((s) => s.id === newSections[0]?.id && s.origin === "custom");
+    if (first) await openQuiz(first, false);
+    else navigate("library");
   }
 
-  function revealAllAnswers() {
-    if (!activeSection) return;
-    setRevealed((cur) => {
-      const next = { ...cur };
-      activeSection.questions.forEach((q) => { if (!answers[q.id]) next[q.id] = true; });
-      return next;
-    });
-    // Persist to IndexedDB
-    const qids = activeSection.questions.map((q) => q.id);
-    revealAllInSection(qids, answers);
+  async function archiveQuiz(quiz) {
+    try { await setSectionArchived(quiz.id, !quiz.archived); setCatalog(await getSectionCatalog()); }
+    catch (err) { setError(`Chưa lưu trữ được bộ đề: ${err.message}`); }
   }
 
-  function resetActiveSection() {
-    if (!activeSection) return;
-    const ok = window.confirm(`Xoá kết quả của "${activeSection.title}"?`);
-    if (!ok) return;
-
-    const qids = activeSection.questions.map((q) => q.id);
-
-    setAnswers((cur) => {
-      const next = { ...cur };
-      activeSection.questions.forEach((q) => delete next[q.id]);
-      return next;
-    });
-    setRevealed((cur) => {
-      const next = { ...cur };
-      activeSection.questions.forEach((q) => delete next[q.id]);
-      return next;
-    });
-
-    // Persist to IndexedDB
-    resetSectionProgress(qids);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  async function deleteQuiz(quiz) {
+    if (!window.confirm(`Xóa bộ đề “${quiz.title}” và tiến độ của bộ đề này?`)) return;
+    try { await saveQueue.current; await deleteCustomSection(quiz.id); setCatalog(await getSectionCatalog()); if (lastSession?.id === quiz.id) { setLastSession(null); sessionRef.current = null; await setSetting("lastSession", null); } }
+    catch (err) { setError(`Chưa xóa được bộ đề: ${err.message}`); }
   }
 
-  async function handleSectionsGenerated(newSections) {
-    // Save to IndexedDB first
-    await persistCustomSections(newSections);
-    // Re-fetch to get consistent data
-    const updated = await fetchCustomSections();
-    setCustomSections(updated);
-    setActiveTab("custom");
-    setCustomSectionIndex(updated.length - newSections.length); // jump to first new section
-    setShowImport(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  function resetQuiz() {
+    if (!window.confirm(`Làm lại “${section.title}”? Tiến độ của bộ đề này sẽ được đặt lại.`)) return;
+    const ids = section.questions.map((q) => q.id);
+    answersRef.current = {};
+    revealedRef.current = {};
+    setAnswers({}); setRevealed({}); setQuestionIndex(0);
+    persist(() => resetSectionProgress(ids)).catch(() => {});
   }
 
-  async function clearAllCustomSectionsHandler() {
-    await clearCustomDB();
-    setCustomSections([]);
-    setCustomSectionIndex(0);
-    setActiveTab("preset");
+  function revealAll() {
+    const ids = section.questions.map((q) => q.id);
+    revealedRef.current = Object.fromEntries(ids.map((id) => [id, true]));
+    setRevealed(revealedRef.current);
+    persist(() => revealAllInSection(ids)).catch(() => {});
   }
 
-  async function deleteCurrentCustomSectionHandler() {
-    const section = customSections[customSectionIndex];
-    if (!section) return;
-    await deleteCustomSectionDB(section.id);
-    const updated = await fetchCustomSections();
-    setCustomSections(updated);
-    // Jump to previous section, or first, or switch tab if none left
-    const newIdx = Math.max(0, customSectionIndex - 1);
-    setCustomSectionIndex(newIdx);
-    if (updated.length === 0) setActiveTab("preset");
+  function exportQuiz() {
+    const { origin, archived, ...data } = section;
+    const url = URL.createObjectURL(new Blob([JSON.stringify({ sections: [data] }, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = `quizspace-${section.id}.json`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  /* ── Loading state ─────────────────────────────────────────────────── */
-  if (!dbReady) {
-    return (
-      <div className="app-shell">
-        <div className="loading-screen">
-          <div className="loading-spinner">⟳</div>
-          <p>Đang khởi tạo cơ sở dữ liệu...</p>
-        </div>
-      </div>
-    );
-  }
+  const tile = (quiz) => <QuizTile key={`${quiz.origin}-${quiz.id}`} section={quiz} onOpen={openQuiz} onArchive={archiveQuiz} onDelete={deleteQuiz} />;
+  const createButton = <button className="primary-button" onClick={() => navigate("create")} type="button"><Icon name="plus" size={18} /> Tạo bộ đề mới</button>;
+  const collectionCard = <button className="collection-card" onClick={() => { setCollection(true); setSearch(""); setFilter("all"); setPage("archive"); }} type="button"><span className="collection-icon"><Icon name="layers" size={30} /></span><div className="collection-info"><div className="collection-title"><h3>PRM393</h3><span className="badge">BỘ SƯU TẬP</span></div><p>Lập trình di động với Flutter & Dart</p><div className="collection-meta"><span>{preset.filter((s) => s.kind === "mod").length} chủ đề</span><span>{preset.filter((s) => s.kind === "exam").length} đề thi</span><span>{formatCount(totalPresetQuestions)} câu hỏi</span></div></div><span className="collection-open">Mở bộ sưu tập <Icon name="arrow" size={18} /></span></button>;
 
-  /* ── Render ─────────────────────────────────────────────────────────── */
-  return (
-    <div className="app-shell">
-      {/* ── HEADER ─────────────────────────────────────────────────────── */}
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-row">
-            <div className="brand">
-              QuizAI <span>Ôn thi trắc nghiệm</span>
-            </div>
-            <div className="header-actions">
-              {/* Only show delete controls when in custom tab — never affects PRM393 */}
-              {activeTab === "custom" && customSections.length > 0 && (
-                <CustomSectionActions
-                  onClearAll={clearAllCustomSectionsHandler}
-                  onDeleteCurrent={deleteCurrentCustomSectionHandler}
-                  hasMultiple={customSections.length > 1}
-                />
-              )}
-              {activeSection && (
-                <>
-                  <button className="utility-button" onClick={revealAllAnswers} type="button">
-                    Hiện hết đáp án
-                  </button>
-                  <button className="utility-button" onClick={resetActiveSection} type="button">
-                    Làm lại
-                  </button>
-                </>
-              )}
-              <button
-                aria-label={`Chuyển sang giao diện ${theme === "dark" ? "sáng" : "tối"}`}
-                className="theme-button"
-                onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-                title="Đổi giao diện sáng/tối"
-                type="button"
-              >
-                {theme === "dark" ? "☀" : "☾"}
-              </button>
-            </div>
-          </div>
+  if (!ready) return <div className="boot-screen"><div className="brand-mark">Q</div><h1>QuizSpace</h1>{error ? <><p role="alert">{error}</p><button className="primary-button" onClick={() => window.location.reload()} type="button">Thử lại</button></> : <><span className="loading-dot" /><p>Đang mở không gian học tập…</p></>}</div>;
 
-          {/* Tab switcher */}
-          <div className="tab-switcher">
-            <button
-              className={`tab-btn ${activeTab === "preset" ? "active" : ""}`}
-              onClick={() => { setActiveTab("preset"); setShowImport(false); }}
-              type="button"
-              id="tab-preset"
-            >
-              📚 PRM393
-            </button>
-            <button
-              className={`tab-btn ${activeTab === "custom" ? "active" : ""}`}
-              onClick={() => setActiveTab("custom")}
-              type="button"
-              id="tab-custom"
-            >
-              ✦ Tài liệu của tôi
-              {customSections.length > 0 && (
-                <span className="tab-count">{customSections.length}</span>
-              )}
-            </button>
-            <button
-              className={`tab-btn import-tab-btn ${showImport ? "active" : ""}`}
-              onClick={() => { setShowImport((v) => !v); setActiveTab("custom"); }}
-              type="button"
-              id="tab-import"
-            >
-              + Tạo đề mới
-            </button>
-          </div>
-
-          {/* Section nav */}
-          {activeTab === "preset" && !showImport && (
-            <nav aria-label="Danh sách module và đề thi" className="section-nav">
-              {presetSections.map((section, index) => {
-                const sectionStats = getStats(section, answers);
-                const isComplete =
-                  sectionStats.total > 0 && sectionStats.answered === sectionStats.total;
-                return (
-                  <span className="nav-item-group" key={section.id}>
-                    {index > 0 &&
-                      section.kind === "exam" &&
-                      presetSections[index - 1].kind !== "exam" && (
-                        <span aria-hidden="true" className="nav-separator" />
-                      )}
-                    <button
-                      aria-current={index === activeSectionIndex ? "page" : undefined}
-                      className={[
-                        "section-button",
-                        section.kind === "exam" ? "exam" : "",
-                        index === activeSectionIndex ? "active" : "",
-                      ].filter(Boolean).join(" ")}
-                      onClick={() => changePresetSection(index)}
-                      title={`${section.title} — đã làm ${sectionStats.answered}/${sectionStats.total}`}
-                      type="button"
-                    >
-                      {section.chip}
-                      {isComplete && <span aria-label="Đã hoàn thành" className="complete-dot" />}
-                    </button>
-                  </span>
-                );
-              })}
-            </nav>
-          )}
-
-          {activeTab === "custom" && !showImport && customSections.length > 0 && (
-            <nav aria-label="Danh sách đề tùy chỉnh" className="section-nav">
-              {customSections.map((section, index) => {
-                const sectionStats = getStats(section, answers);
-                const isComplete =
-                  sectionStats.total > 0 && sectionStats.answered === sectionStats.total;
-                return (
-                  <button
-                    aria-current={index === customSectionIndex ? "page" : undefined}
-                    className={[
-                      "section-button custom-section-btn",
-                      index === customSectionIndex ? "active" : "",
-                    ].filter(Boolean).join(" ")}
-                    key={section.id}
-                    onClick={() => changeCustomSection(index)}
-                    title={`${section.title} — đã làm ${sectionStats.answered}/${sectionStats.total}`}
-                    type="button"
-                  >
-                    {section.chip}
-                    {isComplete && <span aria-label="Đã hoàn thành" className="complete-dot" />}
-                  </button>
-                );
-              })}
-            </nav>
-          )}
-
-          {/* Progress bar */}
-          {activeSection && (
-            <div
-              aria-label={`Tiến độ ${Math.round(progressPercent)}%`}
-              aria-valuemax="100"
-              aria-valuemin="0"
-              aria-valuenow={Math.round(progressPercent)}
-              className="progress-track"
-              role="progressbar"
-            >
-              <span style={{ width: `${progressPercent}%` }} />
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* ── MAIN ────────────────────────────────────────────────────────── */}
-      <main className="main-content">
-        {/* Document Import Panel */}
-        {showImport && (
-          <DocumentImport onSectionsGenerated={handleSectionsGenerated} />
-        )}
-
-        {/* Empty custom state */}
-        {!showImport && activeTab === "custom" && customSections.length === 0 && (
-          <div className="empty-custom">
-            <div className="empty-icon">✦</div>
-            <h2>Chưa có đề nào từ tài liệu</h2>
-            <p>Tải tài liệu của bạn lên (PDF, Word, Markdown, Text) và AI sẽ tự động sinh câu hỏi trắc nghiệm.</p>
-            <ul className="feature-list">
-              <li>📄 Hỗ trợ .pdf, .docx, .md, .txt</li>
-              <li>🖼 Hỗ trợ ảnh .png, .jpg — AI Vision đọc nội dung</li>
-              <li>🤖 AI sinh câu hỏi chất lượng cao</li>
-              <li>📋 Tạo lên đến 10 đề × 50 câu</li>
-              <li>💾 Tự động lưu vào IndexedDB</li>
-            </ul>
-            <button
-              className="generate-btn"
-              onClick={() => setShowImport(true)}
-              type="button"
-              id="start-import-btn"
-            >
-              ✦ Bắt đầu tạo đề từ tài liệu
-            </button>
-          </div>
-        )}
-
-        {/* Quiz content */}
-        {!showImport && activeSection && (
-          <>
-            <section className="section-introduction">
-              <p className="eyebrow">
-                {activeSection.kind === "exam"
-                  ? "Đề thi"
-                  : activeSection.kind === "extracted"
-                  ? "Đề trích xuất"
-                  : activeSection.kind === "custom"
-                  ? "Đề AI tạo"
-                  : "Nội dung học"}
-              </p>
-              <h1>{activeSection.title}</h1>
-              <div className="section-meta">
-                <span>📋 {activeSection.questions.length} câu</span>
-                {bonusCount > 0 && <span>✨ {bonusCount} câu bổ sung</span>}
-                {activeSection.kind === "custom" && activeSection.source && (
-                  <span>📂 {activeSection.source}</span>
-                )}
-                <span>Tiến độ tự động lưu</span>
-              </div>
-            </section>
-
-            <section aria-label={activeSection.title} className="question-list">
-              {activeSection.questions.map((question, index) => (
-                <QuestionCard
-                  index={index}
-                  isRevealed={Boolean(revealed[question.id])}
-                  key={question.id}
-                  onChoose={chooseAnswer}
-                  onReveal={revealAnswer}
-                  question={question}
-                  selectedAnswer={answers[question.id]}
-                />
-              ))}
-            </section>
-          </>
-        )}
+  return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Đến nội dung chính</a>
+    <aside className="sidebar"><button className="brand" type="button" onClick={() => navigate("home")} aria-label="QuizSpace — về Tổng quan"><span className="brand-mark">Q<span /></span><span>QuizSpace<small>KHÔNG GIAN LUYỆN ĐỀ</small></span></button><div className="sidebar-workspace"><span className="workspace-avatar"><Icon name="book" size={18} /></span><div>Không gian cá nhân<small>Học theo cách của bạn</small></div></div><p className="nav-caption">KHÔNG GIAN HỌC TẬP</p><nav aria-label="Điều hướng chính">{navigation.map((item) => <button key={item.id} type="button" className={`nav-button ${page === item.id || (page === "quiz" && item.id === (section?.archived ? "archive" : "library")) ? "active" : ""}`} aria-current={page === item.id ? "page" : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.id === "library" && activeQuizzes.length > 0 && <span className="nav-count">{activeQuizzes.length}</span>}</button>)}</nav><div className="sidebar-create">{createButton}</div><div className="sidebar-note"><span className="note-icon"><Icon name="spark" size={22} /></span><h3>Mỗi ngày, một bước tiến.</h3><p>Một vài câu hỏi hôm nay.<br />Thêm tự tin cho ngày mai.</p></div><div className="sidebar-footer"><Icon name="shield" size={16} /><span>Tiến độ lưu trên thiết bị này</span></div></aside>
+    <div className="workspace"><header className="topbar"><div className="breadcrumb"><Icon name="grid" size={17} /><span>Không gian học tập</span><Icon name="chevron" size={13} /><strong>{pageTitles[page]}</strong></div><div className="topbar-actions"><span className="personal-tag"><span /> Sẵn sàng học tập</span><button className="icon-button theme-button" type="button" aria-label={`Chuyển sang giao diện ${theme === "light" ? "tối" : "sáng"}`} onClick={() => setTheme((t) => t === "light" ? "dark" : "light")}><Icon name={theme === "light" ? "moon" : "sun"} size={20} /></button></div></header>
+      <main className={`main-content ${page === "quiz" ? "quiz-main" : ""}`} id="main-content">
+        {error && <div className="error-banner" role="alert"><span>{error}</span><div>{failedSaves.current.length > 0 && <button type="button" onClick={() => { const retries = failedSaves.current; failedSaves.current = []; setError(""); persist(async () => { for (const retry of retries) await retry(); }).catch(() => {}); }}>Thử lưu lại</button>}<button className="icon-button" aria-label="Đóng thông báo" type="button" onClick={() => setError("")}><Icon name="close" size={17} /></button></div></div>}
+        {page === "home" && <>
+          <div className="page-heading"><div><p className="eyebrow">CHÀO MỪNG ĐẾN QUIZSPACE</p><h1>Hôm nay bạn muốn học gì?</h1><p>Một không gian cho mọi môn học. Một bước gần hơn đến mục tiêu.</p></div>{createButton}</div>
+          <section className="welcome-banner"><div className="welcome-copy"><span className="hero-tag"><Icon name="spark" size={15} /> HỌC CHỦ ĐỘNG · TIẾN BỘ MỖI NGÀY</span><h2>Luyện tập hôm nay.<br /><span>Tự tin hơn ngày mai.</span></h2><p>Tạo bộ đề của riêng bạn, luyện từng câu hỏi<br className="desktop-break" /> và hiểu rõ kiến thức qua mỗi đáp án.</p><button className="hero-button" type="button" onClick={() => lastQuiz ? openQuiz(lastQuiz) : navigate("create")}>{lastQuiz ? "Tiếp tục luyện tập" : "Bắt đầu với bộ đề của bạn"}<Icon name="arrow" size={18} /></button></div><div className="hero-art" aria-hidden="true"><div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" /><div className="art-sheet"><span className="art-sheet-label">YOUR NEXT CHAPTER</span><div className="art-line long" /><div className="art-line short" /><div className="art-answer"><span>A</span><i /></div><div className="art-answer art-correct"><span><Icon name="check" size={14} /></span><i /><Icon name="check" size={17} /></div><div className="art-answer"><span>C</span><i /></div><div className="art-footer"><span /><span /><span /></div></div><div className="art-note"><span><Icon name="check" size={17} /></span>Hiểu thêm một điều mới</div><span className="art-spark"><Icon name="spark" size={28} /></span></div></section>
+          <section className="stats-grid" aria-label="Thống kê thư viện"><div className="stat-card"><span className="stat-icon"><Icon name="book" size={22} /></span><div><p>Bộ đề của bạn</p><strong>{formatCount(activeQuizzes.length)}</strong><span>Sẵn sàng để luyện tập</span></div></div><div className="stat-card"><span className="stat-icon blue"><Icon name="file" size={22} /></span><div><p>Câu hỏi của bạn</p><strong>{formatCount(activeQuizzes.reduce((n, s) => n + (s.questionCount || 0), 0))}</strong><span>Từ những chủ đề bạn chọn</span></div></div><div className="stat-card"><span className="stat-icon amber"><Icon name="archive" size={22} /></span><div><p>Kho lưu trữ</p><strong>{1 + customArchived.length}</strong><span>Bộ sưu tập & bộ đề đã lưu</span></div></div></section>
+          {lastQuiz && <button className="resume-card" type="button" onClick={() => openQuiz(lastQuiz)}><span className="resume-icon"><Icon name="clock" size={22} /></span><div><span>TIẾP TỤC LẦN HỌC GẦN NHẤT</span><h3>{lastQuiz.title}</h3><p>Vị trí đã lưu: câu {(lastSession.questionIndex || 0) + 1} / {lastQuiz.questionCount}</p></div><Icon name="arrow" size={21} /></button>}
+          <div className="section-heading"><div><h2>Bộ đề gần đây</h2><p>Chọn một bộ đề và bắt đầu theo nhịp của bạn.</p></div><button className="text-button" type="button" onClick={() => navigate("library")}>Xem tất cả <Icon name="arrow" size={16} /></button></div>
+          {activeQuizzes.length ? <div className="quiz-grid">{activeQuizzes.slice(0, 3).map(tile)}</div> : <EmptyState onCreate={() => navigate("create")} />}
+          <div className="section-heading archive-preview-heading"><div><h2>Khám phá kho lưu trữ</h2><p>Các bộ sưu tập cũ vẫn luôn ở đây khi bạn cần.</p></div><span className="subtle-label">ĐÃ LƯU TRỮ</span></div>{collectionCard}
+          <div className="page-footnote">QuizSpace · Học tập theo cách của bạn<span>Tiến độ tự động lưu trên trình duyệt này</span></div>
+        </>}
+        {(page === "library" || page === "archive") && <>
+          {collection && <button className="text-button back-link" type="button" onClick={() => { setCollection(false); setSearch(""); setFilter("all"); }}><Icon name="back" size={16} /> Kho lưu trữ</button>}
+          <div className="page-heading"><div><p className="eyebrow">{page === "library" ? "THƯ VIỆN CÁ NHÂN" : "KIẾN THỨC LUÔN Ở ĐÂY"}</p><h1>{collection ? "PRM393 · Flutter & Dart" : pageTitles[page]}</h1><p>{collection ? `${preset.length} bộ câu hỏi · ${formatCount(totalPresetQuestions)} câu hỏi · Giữ nguyên nội dung và tiến độ đã có.` : page === "library" ? "Tất cả bộ đề của bạn, cho bất kỳ môn học nào." : "Lưu lại bộ đề và các bộ sưu tập để sử dụng khi cần."}</p></div>{createButton}</div>
+          <div className="library-toolbar"><label className="search-input"><Icon name="search" size={19} /><input aria-label="Tìm bộ đề" placeholder="Tìm tên bộ đề, môn học…" value={search} onChange={(e) => setSearch(e.target.value)} />{search && <button className="icon-button" type="button" aria-label="Xóa tìm kiếm" onClick={() => setSearch("")}><Icon name="close" size={16} /></button>}</label><select aria-label="Sắp xếp bộ đề" value={sort} onChange={(e) => setSort(e.target.value)}><option value="newest">{collection ? "Thứ tự học tập" : "Mới nhất"}</option><option value="name">Tên A → Z</option><option value="count">Nhiều câu hỏi nhất</option></select></div>
+          {collection && <div className="filter-row" aria-label="Lọc bộ câu hỏi">{[{ id: "all", label: "Tất cả" }, { id: "module", label: "Học theo chủ đề" }, { id: "exam", label: "Đề thi" }].map((f) => <button key={f.id} type="button" aria-pressed={filter === f.id} className={filter === f.id ? "active" : ""} onClick={() => setFilter(f.id)}>{f.label}</button>)}</div>}
+          {page === "archive" && !collection && (!deferredSearch.trim() || "prm393 flutter dart lập trình di động".includes(deferredSearch.toLocaleLowerCase("vi").trim())) && collectionCard}
+          {(page === "library" || collection || customArchived.length > 0 || search) && <><div className="result-count">{visibleQuizzes.length} bộ đề{page === "archive" && !collection ? " đã lưu trữ" : ""}</div>{visibleQuizzes.length ? <div className="quiz-grid">{visibleQuizzes.map(tile)}</div> : <EmptyState filtered={Boolean(search || filter !== "all" || page === "archive")} onCreate={() => navigate("create")} />}</>}
+        </>}
+        {page === "create" && <Suspense fallback={<div className="loading-panel" role="status">Đang mở công cụ tạo đề…</div>}><CreateQuiz onSave={handleSave} /></Suspense>}
+        {page === "quiz" && <>
+          <button className="text-button back-link" type="button" onClick={() => navigate(section?.archived ? "archive" : "library")}><Icon name="back" size={17} /> Về {section?.archived ? "kho lưu trữ" : "đề của tôi"}</button>
+          {quizLoading ? <div className="loading-panel" role="status"><span className="loading-dot" /> Đang tải bộ câu hỏi…</div> : section && <>
+            <div className="page-heading quiz-heading"><div><p className="eyebrow">{section.archived ? "KHO LƯU TRỮ" : "LUYỆN TẬP"}{section.origin === "preset" ? " / PRM393" : ""}</p><h1>{section.title}</h1><p>{stats.total} câu hỏi · Chọn đáp án để xem giải thích</p></div><span className={`save-indicator ${saveStatus === "error" ? "danger" : ""}`} role="status"><Icon name={saveStatus === "saving" ? "clock" : saveStatus === "error" ? "close" : "check"} size={16} />{saveStatus === "saving" ? "Đang lưu…" : saveStatus === "error" ? "Chưa lưu được" : "Đã lưu tiến độ"}</span></div>
+            <div className="quiz-layout"><div className="quiz-content" ref={questionArea}>
+              <div className="quiz-progress"><div><span>Tiến độ luyện tập</span><strong>{stats.answered}/{stats.total} câu</strong></div><div className="progress-track" role="progressbar" aria-label="Tiến độ trả lời" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${progress}%` }} /></div></div>
+              {currentQuestion ? <QuestionCard key={currentQuestion.id} question={currentQuestion} index={questionIndex} selectedAnswer={answers[currentQuestion.id]} isRevealed={Boolean(revealed[currentQuestion.id])} onChoose={choose} onReveal={reveal} /> : <div className="empty-state"><h3>Bộ đề này chưa có câu hỏi</h3></div>}
+              {currentQuestion && <div className="question-navigation"><button className="secondary-button" type="button" disabled={questionIndex === 0} onClick={() => jumpTo(questionIndex - 1)}><Icon name="back" size={17} /> Câu trước</button><span>{questionIndex + 1} <span>/ {stats.total}</span></span><button className="primary-button" type="button" disabled={questionIndex === stats.total - 1} onClick={() => jumpTo(questionIndex + 1)}>Câu tiếp <Icon name="arrow" size={17} /></button></div>}
+              {stats.total > 0 && stats.answered === stats.total && <div className="completion-card" role="status"><span className="stat-icon"><Icon name="check" size={24} /></span><div><h3>Bạn đã hoàn thành bộ đề!</h3><p>Đúng {stats.correct}/{stats.total} câu ({Math.round(stats.correct / stats.total * 100)}%). Xem lại những câu chưa đúng để hiểu sâu hơn.</p></div><button className="secondary-button" type="button" onClick={resetQuiz}>Luyện lại</button></div>}
+              <div className="quiz-tip"><Icon name="shield" size={16} /><span>Tiến độ tự lưu. Bạn có thể quay lại bất cứ lúc nào trên trình duyệt này.</span></div>
+            </div><aside className={`question-map panel ${showMap ? "map-open" : ""}`} aria-label="Điều hướng câu hỏi"><div className="map-heading"><h2>Bản đồ câu hỏi</h2><button className="icon-button mobile-map-close" type="button" aria-label="Đóng bản đồ câu hỏi" onClick={() => setShowMap(false)}><Icon name="close" size={18} /></button><span className="desktop-map-count">{stats.total} câu</span></div><div className="map-stats"><div><strong>{stats.answered}</strong><span>Đã trả lời</span></div><div><strong>{stats.correct}</strong><span>Đúng</span></div><div><strong>{stats.total - stats.answered}</strong><span>Còn lại</span></div></div><div className="map-grid">{section.questions.map((q, i) => { const status = questionStatus(q, answers[q.id], revealed[q.id]); const state = status.answered ? status.isCorrect ? "correct" : "wrong" : revealed[q.id] ? "revealed" : status.selected.length ? "partial" : ""; return <button key={q.id} type="button" aria-label={`Câu ${i + 1}${status.answered ? status.isCorrect ? ", trả lời đúng" : ", trả lời sai" : revealed[q.id] ? ", đã xem đáp án" : status.selected.length ? ", đang chọn đáp án" : ", chưa trả lời"}`} aria-current={i === questionIndex ? "step" : undefined} className={`${state} ${i === questionIndex ? "current" : ""}`} onClick={() => jumpTo(i)}>{i + 1}</button>; })}</div><div className="map-legend"><span><i className="correct" /> Đúng</span><span><i className="wrong" /> Sai</span><span><i className="revealed" /> Đã xem</span></div><div className="map-tools"><button className="text-button" type="button" onClick={resetQuiz}><Icon name="reset" size={17} /> Làm lại bộ đề</button><button className="text-button" type="button" onClick={revealAll}><Icon name="eye" size={17} /> Xem tất cả đáp án</button><button className="text-button" type="button" onClick={exportQuiz}><Icon name="download" size={17} /> Xuất bộ đề JSON</button></div></aside></div>
+            {showMap && <button className="map-backdrop" type="button" aria-label="Đóng bản đồ câu hỏi" onClick={() => setShowMap(false)} />}
+            <div className="mobile-quiz-bar"><span><strong>{questionIndex + 1}</strong> / {stats.total} câu</span><button className="secondary-button" type="button" aria-expanded={showMap} onClick={() => setShowMap((v) => !v)}><Icon name="grid" size={17} /> Bản đồ câu hỏi</button></div>
+          </>}
+        </>}
       </main>
-
-      {/* ── FOOTER ──────────────────────────────────────────────────────── */}
-      {activeSection && !showImport && (
-        <footer className="status-footer">
-          <div className="status-content">
-            <span>
-              Đã làm {activeStats.answered}/{activeStats.total}
-            </span>
-            {activeStats.answered > 0 && (
-              <strong>
-                Đúng {activeStats.correct}/{activeStats.answered} (
-                {Math.round((activeStats.correct / activeStats.answered) * 100)}%)
-              </strong>
-            )}
-          </div>
-        </footer>
-      )}
     </div>
-  );
+    <nav className="mobile-nav" aria-label="Điều hướng trên điện thoại">{[...navigation, { id: "create", label: "Tạo đề", icon: "plus" }].map((item) => <button key={item.id} type="button" aria-current={page === item.id ? "page" : undefined} className={page === item.id ? "active" : ""} onClick={() => navigate(item.id)}><Icon name={item.icon} size={21} /><span>{item.label}</span></button>)}</nav>
+  </div>;
 }

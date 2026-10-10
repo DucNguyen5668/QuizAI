@@ -10,12 +10,13 @@ import {
 import { generateQuestionsWithGemini } from "../utils/geminiClient";
 import { batchOCR, estimateOCRTime, terminateOCR } from "../utils/ocrProcessor";
 import { getSetting, setSetting } from "../data/dataService";
+import "./document-import.css";
 
 /* ─── Constants ───────────────────────────────────────────────────────── */
-const ACCEPTED = ".txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.webp,.bmp,.tiff";
+const ACCEPTED = ".txt,.md,.pdf,.docx,.png,.jpg,.jpeg,.webp";
 const ALLOWED_EXTS = [
-  ".txt", ".md", ".pdf", ".doc", ".docx",
-  ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff",
+  ".txt", ".md", ".pdf", ".docx",
+  ".png", ".jpg", ".jpeg", ".webp",
 ];
 
 /* ─── FileChip ────────────────────────────────────────────────────────── */
@@ -57,7 +58,7 @@ function ProviderSelector({ provider, onChange }) {
         <span className="provider-logo">⚡</span>
         <span>
           <strong>Groq</strong>
-          <small>Nhanh · 30 req/min</small>
+          <small>Tạo câu hỏi từ tài liệu</small>
         </span>
         {provider === "groq" && <span className="provider-check">✓</span>}
       </button>
@@ -70,7 +71,7 @@ function ProviderSelector({ provider, onChange }) {
         <span className="provider-logo">✦</span>
         <span>
           <strong>Gemini</strong>
-          <small>Free · 5 req/min</small>
+          <small>Trích xuất & tạo câu hỏi</small>
         </span>
         {provider === "gemini" && <span className="provider-check">✓</span>}
       </button>
@@ -133,6 +134,9 @@ export default function DocumentImport({ onSectionsGenerated }) {
 
   const fileInputRef = useRef();
   const cancelRef    = useRef(false);
+  const filesRef = useRef([]);
+  const previewsRef = useRef({});
+  const hydratedRef = useRef(false);
 
   // Load saved keys and provider from IndexedDB on mount
   useEffect(() => {
@@ -142,6 +146,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
         getSetting("gemini_key", ""),
         getSetting("groq_key", ""),
       ]);
+      hydratedRef.current = true;
       setProvider(savedProvider || "groq");
       setGeminiKey(savedGemini || "");
       setGroqKey(savedGroq || "");
@@ -149,12 +154,13 @@ export default function DocumentImport({ onSectionsGenerated }) {
   }, []);
 
   // Persist provider changes to IndexedDB
-  useEffect(() => { setSetting("provider", provider); }, [provider]);
+  useEffect(() => { if (hydratedRef.current) setSetting("provider", provider).catch(() => {}); }, [provider]);
 
   // Cleanup previews & terminate OCR worker on unmount
   useEffect(() => {
     return () => {
-      Object.values(previews).forEach(URL.revokeObjectURL);
+      cancelRef.current = true;
+      Object.values(previewsRef.current).forEach(URL.revokeObjectURL);
       terminateOCR();
     };
   }, []); // eslint-disable-line
@@ -167,28 +173,25 @@ export default function DocumentImport({ onSectionsGenerated }) {
   function addFiles(newFiles) {
     const valid = newFiles.filter((f) => ALLOWED_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext)));
     const bad   = newFiles.filter((f) => !ALLOWED_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext)));
-    if (bad.length) setError(`Không hỗ trợ: ${bad.map((f) => f.name).join(", ")}`);
-
-    setFiles((prev) => {
-      const names = new Set(prev.map((f) => f.name));
-      return [...prev, ...valid.filter((f) => !names.has(f.name))];
-    });
-
+    const names = new Set(filesRef.current.map((f) => f.name));
+    const unique = valid.filter((f) => { if (names.has(f.name)) return false; names.add(f.name); return true; });
+    filesRef.current = [...filesRef.current, ...unique];
+    setFiles(filesRef.current);
     const newPrev = {};
-    valid.filter(isImageFile).forEach((f) => { newPrev[f.name] = createImagePreviewUrl(f); });
-    if (Object.keys(newPrev).length) setPreviews((p) => ({ ...p, ...newPrev }));
-
-    setError(null);
+    unique.filter(isImageFile).forEach((f) => { newPrev[f.name] = createImagePreviewUrl(f); });
+    previewsRef.current = { ...previewsRef.current, ...newPrev };
+    setPreviews(previewsRef.current);
+    setError(bad.length ? `Không hỗ trợ: ${bad.map((f) => f.name).join(", ")}` : null);
   }
 
   function removeFile(name) {
-    setFiles((prev) => prev.filter((f) => f.name !== name));
-    setPreviews((prev) => {
-      const next = { ...prev };
-      if (next[name]) URL.revokeObjectURL(next[name]);
-      delete next[name];
-      return next;
-    });
+    filesRef.current = filesRef.current.filter((f) => f.name !== name);
+    setFiles(filesRef.current);
+    const next = { ...previewsRef.current };
+    if (next[name]) URL.revokeObjectURL(next[name]);
+    delete next[name];
+    previewsRef.current = next;
+    setPreviews(next);
   }
 
   /* ── Validation ────────────────────────────────────────────────────── */
@@ -319,7 +322,8 @@ export default function DocumentImport({ onSectionsGenerated }) {
 
         // Groq TPM cool-down between exams (each 50-question call uses ~8k–10k tokens)
         // Must wait ~35s for token bucket to refill before next exam call.
-        if (provider === "groq" && i < examCount - 1) {
+        if (cancelRef.current) throw new Error("Đã hủy");
+        if (provider === "groq" && i < loopCount - 1) {
           if (cancelRef.current) throw new Error("Đã hủy");
           const cooldown = 35;
           for (let s = cooldown; s > 0; s--) {
@@ -336,9 +340,11 @@ export default function DocumentImport({ onSectionsGenerated }) {
         const total = allSections.reduce((sum, s) => sum + (s.questions?.length || 0), 0);
         setStatusMsg(`✅ Hoàn thành! Đã trích xuất ${total} câu hỏi gốc.`);
       } else {
-        setStatusMsg(`✅ Hoàn thành! ${examCount} đề × ${questionsPerExam} câu`);
+        const total = allSections.reduce((sum, s) => sum + s.questions.length, 0);
+        setStatusMsg(`✅ Hoàn thành! ${allSections.length} đề · ${total} câu hỏi`);
       }
-      onSectionsGenerated(allSections);
+      if (cancelRef.current) throw new Error("Đã hủy");
+      await onSectionsGenerated(allSections);
     } catch (err) {
       if (err.message === "Đã hủy") {
         setPhase(null);
@@ -423,8 +429,8 @@ export default function DocumentImport({ onSectionsGenerated }) {
         <ProviderSelector provider={provider} onChange={setProvider} />
         <p className="doc-hint">
           {provider === "groq"
-            ? "⚡ Groq — nhanh, 30 req/min, khuyên dùng."
-            : "✦ Gemini — miễn phí, giới hạn 5 req/min."}
+            ? "Groq — tạo câu hỏi từ nội dung tài liệu."
+            : "Gemini — trích xuất và tạo câu hỏi từ tài liệu."}
           {" "}Ảnh được xử lý bằng <strong>Tesseract.js OCR</strong> ngay trên trình duyệt — không cần API key.
         </p>
       </div>
@@ -432,7 +438,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
       {/* ── API Keys ───────────────────────────────────────────────── */}
       <div className="doc-section key-section">
         <div className="key-block">
-          <label className="doc-label key-label">
+          <label className="doc-label key-label" htmlFor="groq-api-key">
             ⚡ Groq API Key
             {provider === "groq"
               ? <span className="key-required-badge">Bắt buộc</span>
@@ -448,7 +454,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
               onChange={(e) => setGroqKey(e.target.value)}
               placeholder="gsk_..."
             />
-            <button className="key-toggle-btn" onClick={() => setShowRKey((v) => !v)} type="button">
+            <button className="key-toggle-btn" aria-label={showRKey ? "Ẩn Groq API key" : "Hiện Groq API key"} onClick={() => setShowRKey((v) => !v)} type="button">
               {showRKey ? "🙈" : "👁"}
             </button>
             {groqKey && <span className="key-status-badge">✓</span>}
@@ -459,7 +465,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
         </div>
 
         <div className="key-block">
-          <label className="doc-label key-label">
+          <label className="doc-label key-label" htmlFor="gemini-api-key">
             ✦ Gemini API Key
             {provider === "gemini"
               ? <span className="key-required-badge">Bắt buộc</span>
@@ -475,7 +481,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
               onChange={(e) => setGeminiKey(e.target.value)}
               placeholder="AQ...."
             />
-            <button className="key-toggle-btn" onClick={() => setShowGKey((v) => !v)} type="button">
+            <button className="key-toggle-btn" aria-label={showGKey ? "Ẩn Gemini API key" : "Hiện Gemini API key"} onClick={() => setShowGKey((v) => !v)} type="button">
               {showGKey ? "🙈" : "👁"}
             </button>
             {geminiKey && <span className="key-status-badge">✓</span>}
@@ -495,13 +501,13 @@ export default function DocumentImport({ onSectionsGenerated }) {
           type="text"
           value={topicTitle}
           onChange={(e) => setTopicTitle(e.target.value)}
-          placeholder="VD: Mạng máy tính, Flutter/Dart, PRM393..."
+          placeholder="Ví dụ: Tiếng Anh, Mạng máy tính, Sinh học…"
         />
       </div>
 
       {/* ── Auto Scraper ───────────────────────────────────────────── */}
-      <div className="doc-section">
-        <label className="doc-label">📥 Tải ảnh tự động từ Diễn đàn (Mới)</label>
+      {import.meta.env.DEV && <div className="doc-section">
+        <label className="doc-label">📥 Tải ảnh từ diễn đàn</label>
         <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
           <input 
             type="text" 
@@ -528,7 +534,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
           {isScraping ? "⏳ Đang chạy ngầm (vui lòng chờ 1-2 phút)..." : "Tải Ảnh & Nạp Tự Động"}
         </button>
         {scrapeStatus && <div style={{ marginTop: '10px', fontSize: '13px', color: 'var(--text-dim)' }}>{scrapeStatus}</div>}
-      </div>
+      </div>}
 
       {/* ── Drop zone ──────────────────────────────────────────────── */}
       <div className="doc-section">
@@ -544,7 +550,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
           onDragLeave={onDragLeave}
           onClick={() => fileInputRef.current?.click()}
           role="button" tabIndex={0}
-          onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
         >
           <input
             ref={fileInputRef}
@@ -684,7 +690,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
         )}
         {mode === "extract" && (
           <div style={{ fontSize: "14px", color: "var(--text-dim)", padding: "12px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
-            💡 <strong>Chế độ Trích xuất:</strong> AI sẽ quét toàn bộ tài liệu/ảnh của bạn và bóc tách <strong>chính xác 100%</strong> các câu hỏi trắc nghiệm có sẵn, không tự thêm bớt hay đảo chữ. Tự động giải câu hỏi nếu không có đáp án.
+            💡 <strong>Chế độ Trích xuất:</strong> Giữ nội dung câu hỏi có sẵn trong tài liệu tối đa. Hãy kiểm tra lại câu hỏi và đáp án sau khi xử lý, đặc biệt khi tài liệu gốc chưa có lời giải.
           </div>
         )}
       </div>
@@ -706,13 +712,7 @@ export default function DocumentImport({ onSectionsGenerated }) {
         <div className="processing-overlay">
           <div className="processing-overlay-content">
             {/* Multi-ring rainbow spinner */}
-            <div className="ring-spinner">
-              <div className="ring" />
-              <div className="ring" />
-              <div className="ring" />
-              <div className="ring" />
-              <div className="ring" />
-            </div>
+            <span className="loading-dot" />
 
             <div className="processing-overlay-title">
               {phase === "ocr" ? "Tesseract OCR — Đang quét ảnh" : "AI — Đang xử lý"}

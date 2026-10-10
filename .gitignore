@@ -5,3 +5,5 @@ dist/
 .vite.*.log
 .env
 .env.*
+.npm-cache/
+artifacts/

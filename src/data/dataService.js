@@ -1,12 +1,15 @@
 /**
- * PRM393 Quiz — Data Service
+ * QuizSpace — Data Service
  *
  * High-level CRUD + seed operations over IndexedDB (Dexie).
  * This module completely replaces all localStorage usage and the
  * direct JSON import that was previously in App.jsx.
  */
 import db from "./db";
-import presetData from "./questions.json";
+import archiveCatalog from "./archiveCatalog.json";
+
+let seedPromise;
+let initPromise;
 
 /* ════════════════════════════════════════════════════════════════════════
  * SEEDING — one-time import of bundled questions.json into IndexedDB
@@ -17,8 +20,16 @@ import presetData from "./questions.json";
  * Runs only once (detected via a settings flag).
  */
 export async function seedPresetData() {
+  if (seedPromise) return seedPromise;
+  seedPromise = seedArchive().catch((error) => { seedPromise = null; throw error; });
+  return seedPromise;
+}
+
+async function seedArchive() {
   const flag = await db.settings.get("seeded");
   if (flag?.value === true) return; // already seeded
+
+  const { default: presetData } = await import("./questions.json");
 
   await db.transaction("rw", db.sections, db.questions, db.settings, async () => {
     // Clear old data in case of partial seed
@@ -34,6 +45,9 @@ export async function seedPresetData() {
         kind: section.kind,
         chip: section.chip,
         title: section.title,
+        collectionId: "prm393",
+        archived: 1,
+        questionCount: section.questions.length,
       });
 
       for (const q of section.questions) {
@@ -122,6 +136,8 @@ export async function migrateFromLocalStorage() {
                 title: section.title,
                 source: section.source || null,
                 createdAt: section.createdAt || new Date().toISOString(),
+                archived: 0,
+                questionCount: questions.length,
               });
 
               const qRows = questions.map((q) => ({
@@ -179,8 +195,48 @@ export async function migrateFromLocalStorage() {
  * Safe to call multiple times (both operations are idempotent).
  */
 export async function initDB() {
-  await seedPresetData();
-  await migrateFromLocalStorage();
+  if (!initPromise) {
+    initPromise = db.open().then(() => migrateFromLocalStorage()).catch((error) => {
+      initPromise = null;
+      throw error;
+    });
+  }
+  return initPromise;
+}
+
+// The library reads only metadata. Question content is loaded when a quiz opens.
+export async function getSectionCatalog() {
+  const [preset, custom] = await Promise.all([
+    db.sections.toArray(),
+    db.customSections.orderBy("createdAt").reverse().toArray(),
+  ]);
+  const byId = new Map(preset.map((s) => [s.id, s]));
+  const archived = archiveCatalog.map((s) => ({ ...s, ...byId.get(s.id) }));
+  return [
+    ...custom.map((s) => ({ ...s, origin: "custom", archived: Boolean(s.archived) })),
+    ...archived.map((s) => ({ ...s, origin: "preset", archived: true, collectionId: "prm393" })),
+  ];
+}
+
+export async function getSectionQuestions(section) {
+  const table = section.origin === "preset" ? db.questions : db.customQuestions;
+  const existing = await table.where("sectionId").equals(section.id).sortBy("n");
+  if (section.origin !== "preset" || existing.length) return existing;
+  const metadata = archiveCatalog.find((s) => s.id === section.id);
+  if (!metadata) throw new Error("Bộ câu hỏi không có trong kho lưu trữ.");
+  const response = await fetch(`${import.meta.env.BASE_URL}data/archives/prm393/${metadata.id}.json`);
+  if (!response.ok) throw new Error("Không tải được câu hỏi từ kho lưu trữ. Hãy thử lại khi có kết nối mạng.");
+  const questions = await response.json();
+  if (!Array.isArray(questions) || questions.length !== metadata.questionCount) throw new Error("Dữ liệu bộ câu hỏi không đầy đủ.");
+  await db.transaction("rw", db.sections, db.questions, async () => {
+    await db.sections.put({ ...metadata, archived: 1, collectionId: "prm393" });
+    await db.questions.bulkPut(questions.map((q) => ({ ...q, sectionId: section.id })));
+  });
+  return questions;
+}
+
+export async function setSectionArchived(sectionId, archived) {
+  await db.customSections.update(sectionId, { archived: archived ? 1 : 0 });
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -192,6 +248,7 @@ export async function initDB() {
  * Returns the same shape as the old quizData.sections array.
  */
 export async function getPresetSections() {
+  await seedPresetData();
   const sections = await db.sections.toArray();
   const allQuestions = await db.questions.toArray();
 
@@ -245,8 +302,14 @@ export async function saveCustomSections(sections) {
         chip: section.chip,
         title: section.title,
         source: section.source || null,
+        subject: section.subject || "",
         createdAt: section.createdAt || new Date().toISOString(),
+        archived: section.archived ? 1 : 0,
+        questionCount: questions.length,
       });
+
+      // Replacing a section must not leave stale questions behind.
+      await db.customQuestions.where("sectionId").equals(section.id).delete();
 
       const qRows = questions.map((q) => ({
         id: q.id,
@@ -267,7 +330,9 @@ export async function saveCustomSections(sections) {
  * Delete all custom sections and their questions.
  */
 export async function clearAllCustomSections() {
-  await db.transaction("rw", db.customSections, db.customQuestions, async () => {
+  await db.transaction("rw", db.customSections, db.customQuestions, db.progress, async () => {
+    const ids = await db.customQuestions.toCollection().primaryKeys();
+    await db.progress.bulkDelete(ids);
     await db.customSections.clear();
     await db.customQuestions.clear();
   });
@@ -278,7 +343,9 @@ export async function clearAllCustomSections() {
  * @param {string} sectionId
  */
 export async function deleteCustomSection(sectionId) {
-  await db.transaction("rw", db.customSections, db.customQuestions, async () => {
+  await db.transaction("rw", db.customSections, db.customQuestions, db.progress, async () => {
+    const ids = await db.customQuestions.where("sectionId").equals(sectionId).primaryKeys();
+    await db.progress.bulkDelete(ids);
     await db.customSections.delete(sectionId);
     await db.customQuestions.where("sectionId").equals(sectionId).delete();
   });
@@ -291,8 +358,8 @@ export async function deleteCustomSection(sectionId) {
 /**
  * Get all progress as two maps: { answers: {qid: answer}, revealed: {qid: true} }
  */
-export async function getProgress() {
-  const rows = await db.progress.toArray();
+export async function getProgress(questionIds) {
+  const rows = questionIds ? (await db.progress.bulkGet(questionIds)).filter(Boolean) : await db.progress.toArray();
   const answers = {};
   const revealed = {};
 
@@ -308,11 +375,14 @@ export async function getProgress() {
  * Save an answer for a question.
  */
 export async function saveAnswer(questionId, answer) {
+  await db.transaction("rw", db.progress, async () => {
   const existing = await db.progress.get(questionId);
   await db.progress.put({
     questionId,
     answer,
     revealed: existing?.revealed || false,
+    timestamp: Date.now(),
+  });
   });
 }
 
@@ -320,30 +390,30 @@ export async function saveAnswer(questionId, answer) {
  * Mark a question as revealed (show answer without selecting).
  */
 export async function saveRevealed(questionId) {
+  await db.transaction("rw", db.progress, async () => {
   const existing = await db.progress.get(questionId);
   await db.progress.put({
     questionId,
     answer: existing?.answer || null,
     revealed: true,
+    timestamp: Date.now(),
+  });
   });
 }
 
 /**
- * Reveal all unanswered questions in a section.
+ * Reveal all questions without changing their answers.
  * @param {Array} questionIds — list of question IDs in the section
- * @param {Object} currentAnswers — current answers map
  */
-export async function revealAllInSection(questionIds, currentAnswers) {
+export async function revealAllInSection(questionIds) {
   await db.transaction("rw", db.progress, async () => {
     for (const qid of questionIds) {
-      if (!currentAnswers[qid]) {
         const existing = await db.progress.get(qid);
         await db.progress.put({
           questionId: qid,
           answer: existing?.answer || null,
           revealed: true,
         });
-      }
     }
   });
 }
@@ -404,7 +474,7 @@ export async function exportAllData() {
     customSections,
     customQuestions,
     progress,
-    settings,
+    settings: settings.filter((s) => !["gemini_key", "groq_key"].includes(s.key)),
   };
 }
 

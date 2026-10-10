@@ -12,6 +12,22 @@
 /** Singleton worker — reused across calls to avoid re-init overhead */
 let _worker = null;
 let _workerReady = false;
+let scriptPromise = null;
+
+function loadOCRScript() {
+  if (window.Tesseract) return Promise.resolve();
+  if (!scriptPromise) {
+    scriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js";
+      script.crossOrigin = "anonymous";
+      script.onload = () => window.Tesseract ? resolve() : reject(new Error("Không khởi tạo được OCR."));
+      script.onerror = () => { script.remove(); reject(new Error("Không tải được OCR. Kiểm tra kết nối mạng và thử lại.")); };
+      document.head.appendChild(script);
+    }).catch((error) => { scriptPromise = null; throw error; });
+  }
+  return scriptPromise;
+}
 
 /**
  * Initialize (or reuse) the Tesseract worker.
@@ -23,7 +39,8 @@ let _workerReady = false;
 export async function initOCRWorker(onStatus) {
   if (_worker && _workerReady) return _worker;
 
-  // Make sure CDN script has loaded
+  // Download OCR only when image recognition is requested.
+  await loadOCRScript();
   if (!window.Tesseract) {
     throw new Error(
       "Tesseract.js chưa được tải. Vui lòng kiểm tra kết nối internet và thử lại."

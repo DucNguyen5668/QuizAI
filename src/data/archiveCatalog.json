@@ -1,0 +1,163 @@
+[
+  {
+    "id": "M1",
+    "kind": "mod",
+    "chip": "M1",
+    "title": "Module 1 — Flutter Overview & Tooling",
+    "questionCount": 40
+  },
+  {
+    "id": "M2",
+    "kind": "mod",
+    "chip": "M2",
+    "title": "Module 2 — Dart Essentials",
+    "questionCount": 47
+  },
+  {
+    "id": "M3",
+    "kind": "mod",
+    "chip": "M3",
+    "title": "Module 3 — Advanced Dart (Async + OOP + Generics)",
+    "questionCount": 47
+  },
+  {
+    "id": "M4",
+    "kind": "mod",
+    "chip": "M4",
+    "title": "Module 4 — UI Fundamentals & Widget Lifecycle",
+    "questionCount": 55
+  },
+  {
+    "id": "M5",
+    "kind": "mod",
+    "chip": "M5",
+    "title": "Module 5 — Navigation",
+    "questionCount": 41
+  },
+  {
+    "id": "M6",
+    "kind": "mod",
+    "chip": "M6",
+    "title": "Module 6 — Layout & Responsive Design",
+    "questionCount": 41
+  },
+  {
+    "id": "M7",
+    "kind": "mod",
+    "chip": "M7",
+    "title": "Module 7 — Forms & Validation",
+    "questionCount": 41
+  },
+  {
+    "id": "M8",
+    "kind": "mod",
+    "chip": "M8",
+    "title": "Module 8 — Networking & JSON",
+    "questionCount": 46
+  },
+  {
+    "id": "M9",
+    "kind": "mod",
+    "chip": "M9",
+    "title": "Module 9 — Local Storage & Persistence",
+    "questionCount": 45
+  },
+  {
+    "id": "M10",
+    "kind": "mod",
+    "chip": "M10",
+    "title": "Module 10 — Authentication & User Management",
+    "questionCount": 42
+  },
+  {
+    "id": "M11",
+    "kind": "mod",
+    "chip": "M11",
+    "title": "Module 11 — Testing & Debugging",
+    "questionCount": 38
+  },
+  {
+    "id": "M12",
+    "kind": "mod",
+    "chip": "M12",
+    "title": "Module 12 — Build, Release & Performance",
+    "questionCount": 41
+  },
+  {
+    "id": "M13",
+    "kind": "mod",
+    "chip": "M13",
+    "title": "Module 13 — Notifications",
+    "questionCount": 30
+  },
+  {
+    "id": "M14",
+    "kind": "mod",
+    "chip": "M14",
+    "title": "Module 14 — State Management",
+    "questionCount": 25
+  },
+  {
+    "id": "DE1",
+    "kind": "exam",
+    "chip": "Đề thử 1",
+    "title": "Đề thử 1 — 50 câu",
+    "questionCount": 50
+  },
+  {
+    "id": "DE2",
+    "kind": "exam",
+    "chip": "Đề thử 2",
+    "title": "Đề thử 2 — 48 câu (thiếu câu 10, 11 trong ảnh gốc)",
+    "questionCount": 48
+  },
+  {
+    "id": "P1",
+    "kind": "exam",
+    "chip": "Đề 1",
+    "title": "Đề 1 — 50 câu (câu 1–50)",
+    "questionCount": 50
+  },
+  {
+    "id": "P2",
+    "kind": "exam",
+    "chip": "Đề 2",
+    "title": "Đề 2 — 50 câu (câu 51–102)",
+    "questionCount": 50
+  },
+  {
+    "id": "P3",
+    "kind": "exam",
+    "chip": "Đề 3",
+    "title": "Đề 3 — 50 câu (câu 103–152)",
+    "questionCount": 50
+  },
+  {
+    "id": "P4",
+    "kind": "exam",
+    "chip": "Đề 4",
+    "title": "Đề 4 — 50 câu (câu 153–205)",
+    "questionCount": 50
+  },
+  {
+    "id": "P5",
+    "kind": "exam",
+    "chip": "Đề 5",
+    "title": "Đề 5 — 50 câu (câu 206–255)",
+    "questionCount": 50
+  },
+  {
+    "id": "P6",
+    "kind": "exam",
+    "chip": "Đề 6",
+    "title": "Đề 6 — 50 câu (câu 256–308)",
+    "questionCount": 50
+  },
+  {
+    "id": "P7",
+    "kind": "exam",
+    "chip": "Đề 7",
+    "title": "Đề 7 — 16 câu (câu 309–326)",
+    "questionCount": 16
+  }
+]
